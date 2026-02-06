@@ -1,4 +1,5 @@
 mod claude;
+mod app_settings;
 mod format;
 pub mod raw_format;
 mod codex;
@@ -55,6 +56,7 @@ impl Default for Settings {
 #[derive(Clone)]
 struct AppState {
 	settings: Arc<Mutex<Settings>>,
+	prefs: Arc<Mutex<app_settings::AppSettings>>,
 	menu: MenuHandles,
 	last_ui: Arc<Mutex<LastUiState>>,
 }
@@ -65,6 +67,8 @@ struct MenuHandles {
 	stats_cc_full: MenuItem<Runtime>,
 	totals_cx_all: MenuItem<Runtime>,
 	totals_cc_all: MenuItem<Runtime>,
+	dock_icon: CheckMenuItem<Runtime>,
+	autostart: CheckMenuItem<Runtime>,
 	pricing_status: MenuItem<Runtime>,
 	period_today: CheckMenuItem<Runtime>,
 	period_week: CheckMenuItem<Runtime>,
@@ -84,6 +88,22 @@ struct LastUiState {
 	totals_cx_all: Option<String>,
 	totals_cc_all: Option<String>,
 	pricing_status: Option<String>,
+}
+
+fn apply_dock_icon_preference(app: &AppHandle, show_dock_icon: bool) {
+	#[cfg(target_os = "macos")]
+	{
+		let policy = if show_dock_icon {
+			tauri::ActivationPolicy::Regular
+		} else {
+			tauri::ActivationPolicy::Accessory
+		};
+		let _ = app.set_activation_policy(policy);
+	}
+	#[cfg(not(target_os = "macos"))]
+	{
+		let _ = (app, show_dock_icon);
+	}
 }
 
 fn range_for_period(period: Period) -> time_range::DateRange {
@@ -121,6 +141,7 @@ fn compute_title(_app: &AppHandle, settings: Settings) -> String {
 fn build_menu(
 	app: &AppHandle,
 	settings: Settings,
+	prefs: &app_settings::AppSettings,
 ) -> tauri::Result<(Menu<Runtime>, MenuHandles)> {
 	let stats_cx_full =
 		MenuItem::with_id(app, "stats.cx_full", "Loading cx…", false, None::<&str>)?;
@@ -130,6 +151,22 @@ fn build_menu(
 		MenuItem::with_id(app, "totals.cx_all", "All cx: Loading…", false, None::<&str>)?;
 	let totals_cc_all =
 		MenuItem::with_id(app, "totals.cc_all", "All cc: Loading…", false, None::<&str>)?;
+	let dock_icon = CheckMenuItem::with_id(
+		app,
+		"dock.icon",
+		"显示程序坞图标",
+		true,
+		prefs.show_dock_icon,
+		None::<&str>,
+	)?;
+	let autostart = CheckMenuItem::with_id(
+		app,
+		"autostart",
+		"开机启动",
+		true,
+		prefs.autostart,
+		None::<&str>,
+	)?;
 	let pricing_status = MenuItem::with_id(
 		app,
 		"pricing.status",
@@ -220,6 +257,9 @@ fn build_menu(
 			&PredefinedMenuItem::separator(app)?,
 			&totals_cx_all,
 			&totals_cc_all,
+			&PredefinedMenuItem::separator(app)?,
+			&dock_icon,
+			&autostart,
 			&pricing_status,
 			&proxy_open,
 			&PredefinedMenuItem::separator(app)?,
@@ -238,6 +278,8 @@ fn build_menu(
 			stats_cc_full,
 			totals_cx_all,
 			totals_cc_all,
+			dock_icon,
+			autostart,
 			pricing_status,
 			period_today,
 			period_week,
@@ -442,16 +484,32 @@ fn tokbar_set_proxy_config(app: AppHandle, config: proxy_config::ProxyConfig) ->
 pub fn run() {
 	tauri::Builder::default()
 		.plugin(tauri_plugin_opener::init())
+		.plugin(tauri_plugin_autostart::init(
+			tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+			None,
+		))
 		.invoke_handler(tauri::generate_handler![
 			tokbar_get_proxy_config,
 			tokbar_set_proxy_config
 		])
 		.setup(|app| {
+			use tauri_plugin_autostart::ManagerExt as _;
+
 			let settings = Settings::default();
-			let (menu, menu_handles) = build_menu(&app.handle(), settings)?;
+			let prefs = app_settings::load_settings();
+
+			apply_dock_icon_preference(&app.handle(), prefs.show_dock_icon);
+			if prefs.autostart {
+				let _ = app.handle().autolaunch().enable();
+			} else {
+				let _ = app.handle().autolaunch().disable();
+			}
+
+			let (menu, menu_handles) = build_menu(&app.handle(), settings, &prefs)?;
 
 				let state = AppState {
 					settings: Arc::new(Mutex::new(settings)),
+					prefs: Arc::new(Mutex::new(prefs)),
 					menu: menu_handles,
 					last_ui: Arc::new(Mutex::new(LastUiState::default())),
 				};
@@ -467,17 +525,41 @@ pub fn run() {
 					};
 					let mut settings = state.settings.lock().expect("settings lock poisoned");
 
-					match event.id().as_ref() {
-						"refresh" => {
-							let app = app.clone();
-							let settings = *settings;
-							std::thread::spawn(move || update_tray_title(&app, settings));
-							return;
-						}
-						"pricing.status" | "proxy.open" => {
-							open_proxy_window(app);
-							return;
-						}
+						match event.id().as_ref() {
+							"refresh" => {
+								let app = app.clone();
+								let settings = *settings;
+								std::thread::spawn(move || update_tray_title(&app, settings));
+								return;
+							}
+							"dock.icon" => {
+								let mut prefs = state.prefs.lock().expect("prefs lock poisoned");
+								prefs.show_dock_icon = !prefs.show_dock_icon;
+								let _ = app_settings::save_settings(prefs.clone());
+								apply_dock_icon_preference(app, prefs.show_dock_icon);
+								let _ = state.menu.dock_icon.set_checked(prefs.show_dock_icon);
+								return;
+							}
+							"autostart" => {
+								use tauri_plugin_autostart::ManagerExt as _;
+								let mut prefs = state.prefs.lock().expect("prefs lock poisoned");
+								let next = !prefs.autostart;
+								let result = if next {
+									app.autolaunch().enable()
+								} else {
+									app.autolaunch().disable()
+								};
+								if result.is_ok() {
+									prefs.autostart = next;
+									let _ = app_settings::save_settings(prefs.clone());
+									let _ = state.menu.autostart.set_checked(prefs.autostart);
+								}
+								return;
+							}
+							"pricing.status" | "proxy.open" => {
+								open_proxy_window(app);
+								return;
+							}
 						"quit" => app.exit(0),
 						"period.today" => settings.period = Period::Today,
 						"period.week" => settings.period = Period::Week,
