@@ -12,6 +12,9 @@ dist
 dist-ssr
 *.local
 
+# Codex CLI / Skills (local workspace install)
+.codex/
+
 # Tauri / Rust
 src-tauri/target
 src-tauri/gen
