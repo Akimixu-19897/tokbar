@@ -9,7 +9,10 @@ use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager, Wry};
 
-use crate::{app_settings, format, litellm, proxy_config, raw_format, time_range, usage};
+use crate::{
+	app_settings, format, litellm, proxy_config, raw_format, rightcodes, rightcodes_api,
+	rightcodes_token_store, time_range, usage,
+};
 
 const REFRESH_INTERVAL_SECS: u64 = 30;
 type Runtime = Wry;
@@ -58,6 +61,7 @@ struct MenuHandles {
 	stats_cc_full: MenuItem<Runtime>,
 	totals_cx_all: MenuItem<Runtime>,
 	totals_cc_all: MenuItem<Runtime>,
+	rightcodes_status: MenuItem<Runtime>,
 	dock_icon: CheckMenuItem<Runtime>,
 	autostart: CheckMenuItem<Runtime>,
 	pricing_status: MenuItem<Runtime>,
@@ -79,6 +83,7 @@ struct LastUiState {
 	totals_cx_all: Option<String>,
 	totals_cc_all: Option<String>,
 	pricing_status: Option<String>,
+	rightcodes_status: Option<String>,
 }
 
 fn load_tray_icon_image() -> Option<tauri::image::Image<'static>> {
@@ -156,13 +161,13 @@ fn build_menu(
 	prefs: &app_settings::AppSettings,
 ) -> tauri::Result<(Menu<Runtime>, MenuHandles)> {
 	let stats_cx_full =
-		MenuItem::with_id(app, "stats.cx_full", "Loading cx…", false, None::<&str>)?;
+		MenuItem::with_id(app, "stats.cx_full", "正在加载 cx…", false, None::<&str>)?;
 	let stats_cc_full =
-		MenuItem::with_id(app, "stats.cc_full", "Loading cc…", false, None::<&str>)?;
+		MenuItem::with_id(app, "stats.cc_full", "正在加载 cc…", false, None::<&str>)?;
 	let totals_cx_all =
-		MenuItem::with_id(app, "totals.cx_all", "All cx: Loading…", false, None::<&str>)?;
+		MenuItem::with_id(app, "totals.cx_all", "全部 cx：加载中…", false, None::<&str>)?;
 	let totals_cc_all =
-		MenuItem::with_id(app, "totals.cc_all", "All cc: Loading…", false, None::<&str>)?;
+		MenuItem::with_id(app, "totals.cc_all", "全部 cc：加载中…", false, None::<&str>)?;
 	let dock_icon = CheckMenuItem::with_id(
 		app,
 		"dock.icon",
@@ -180,12 +185,16 @@ fn build_menu(
 		None::<&str>,
 	)?;
 	let pricing_status = MenuItem::with_id(app, "pricing.status", "模型价格：检查中…", true, None::<&str>)?;
-	let proxy_open = MenuItem::with_id(app, "proxy.open", "Proxy…", true, None::<&str>)?;
+	let proxy_open = MenuItem::with_id(app, "proxy.open", "代理设置…", true, None::<&str>)?;
+	let rightcodes_status =
+		MenuItem::with_id(app, "rightcodes.status", "rc：未登录（点击登录）", false, None::<&str>)?;
+	let rightcodes_login =
+		MenuItem::with_id(app, "rightcodes.login", "Right.codes 登录…", true, None::<&str>)?;
 
 	let period_today = CheckMenuItem::with_id(
 		app,
 		"period.today",
-		"Today",
+		"今天",
 		true,
 		settings.period == Period::Today,
 		None::<&str>,
@@ -193,7 +202,7 @@ fn build_menu(
 	let period_week = CheckMenuItem::with_id(
 		app,
 		"period.week",
-		"Week",
+		"本周",
 		true,
 		settings.period == Period::Week,
 		None::<&str>,
@@ -201,7 +210,7 @@ fn build_menu(
 	let period_month = CheckMenuItem::with_id(
 		app,
 		"period.month",
-		"Month",
+		"本月",
 		true,
 		settings.period == Period::Month,
 		None::<&str>,
@@ -209,7 +218,7 @@ fn build_menu(
 	let period_year = CheckMenuItem::with_id(
 		app,
 		"period.year",
-		"Year",
+		"本年",
 		true,
 		settings.period == Period::Year,
 		None::<&str>,
@@ -218,7 +227,7 @@ fn build_menu(
 	let source_cx = CheckMenuItem::with_id(
 		app,
 		"source.cx",
-		"cx (Codex)",
+		"cx（Codex）",
 		true,
 		settings.source == Source::Cx,
 		None::<&str>,
@@ -226,7 +235,7 @@ fn build_menu(
 	let source_cc = CheckMenuItem::with_id(
 		app,
 		"source.cc",
-		"cc (Claude Code)",
+		"cc（Claude Code）",
 		true,
 		settings.source == Source::Cc,
 		None::<&str>,
@@ -243,12 +252,12 @@ fn build_menu(
 	let period_menu = Submenu::with_id_and_items(
 		app,
 		"period",
-		"Period",
+		"统计周期",
 		true,
 		&[&period_today, &period_week, &period_month, &period_year],
 	)?;
 	let source_menu =
-		Submenu::with_id_and_items(app, "source", "Source", true, &[&source_cx, &source_cc, &source_both])?;
+		Submenu::with_id_and_items(app, "source", "数据来源", true, &[&source_cx, &source_cc, &source_both])?;
 
 	let menu = Menu::with_items(
 		app,
@@ -263,12 +272,14 @@ fn build_menu(
 			&autostart,
 			&pricing_status,
 			&proxy_open,
+			&rightcodes_status,
+			&rightcodes_login,
 			&PredefinedMenuItem::separator(app)?,
-			&MenuItem::with_id(app, "refresh", "Refresh Now", true, None::<&str>)?,
+			&MenuItem::with_id(app, "refresh", "立即刷新", true, None::<&str>)?,
 			&period_menu,
 			&source_menu,
 			&PredefinedMenuItem::separator(app)?,
-			&MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?,
+			&MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?,
 		],
 	)?;
 
@@ -279,6 +290,7 @@ fn build_menu(
 			stats_cc_full,
 			totals_cx_all,
 			totals_cc_all,
+			rightcodes_status,
 			dock_icon,
 			autostart,
 			pricing_status,
@@ -339,13 +351,22 @@ fn update_tray_title(app: &AppHandle, settings: Settings) {
 			}
 		}
 
-		let title = match settings.source {
+		let base_title = match settings.source {
 			Source::Cx => format::format_single_title(period, "cx", cx, show_cost),
 			Source::Cc => match cc_result {
 				Ok(totals) => format::format_single_title(period, "cc", totals, show_cost),
 				Err(_) => format!("{period} cc ERR"),
 			},
 			Source::Both => format::format_both_title_one_line(period, cx, cc_for_both, show_cost),
+		};
+
+		// Right.codes：只有当拉取成功且可计算套餐额度时，才在状态栏追加 `rc ...`；
+		// 任何失败/未登录/字段缺失，都只在菜单里提示原因，避免在状态栏制造噪音。
+		let (rc_title_part, rc_menu_text) = compute_rightcodes_ui();
+		let title = if let Some(rc) = rc_title_part {
+			format!("{base} {rc}", base = base_title, rc = rc)
+		} else {
+			base_title
 		};
 
 		let mut last_ui = state
@@ -435,6 +456,11 @@ fn update_tray_title(app: &AppHandle, settings: Settings) {
 				ui.pricing_status = Some(pricing_text);
 			}
 
+			if ui.rightcodes_status.as_deref() != Some(rc_menu_text.as_str()) {
+				let _ = state.menu.rightcodes_status.set_text(rc_menu_text.clone());
+				ui.rightcodes_status = Some(rc_menu_text);
+			}
+
 			// 没有 cc 数据来源时禁用 cc/both 相关菜单项，避免用户选择后产生困惑。
 			let _ = state.menu.stats_cc_full.set_enabled(cc_available);
 			let _ = state.menu.totals_cc_all.set_enabled(cc_available);
@@ -443,6 +469,33 @@ fn update_tray_title(app: &AppHandle, settings: Settings) {
 		}
 
 	}
+}
+
+fn compute_rightcodes_ui() -> (Option<String>, String) {
+	let store = rightcodes_token_store::RightcodesTokenStore::new();
+	let Some(token) = store.load_token() else {
+		return (
+			None,
+			"rc：未登录（点击 Right.codes 登录…）".to_string(),
+		);
+	};
+
+	let client = rightcodes_api::RightcodesApiClient::new("https://right.codes");
+	let payload = match client.list_subscriptions(&token) {
+		Ok(v) => v,
+		Err(e) => {
+			// 失败只显示在菜单里（标题不显示 rc）。
+			return (None, e.to_menu_text());
+		}
+	};
+
+	let Some(summary) = rightcodes::summarize_single_subscription(&payload) else {
+		return (
+			None,
+			"rc：套餐数据缺失（无法计算额度）".to_string(),
+		);
+	};
+	(Some(summary.title_part), summary.menu_status)
 }
 
 fn spawn_refresh_loop(app: AppHandle, settings: Arc<Mutex<Settings>>) {
@@ -465,10 +518,34 @@ fn open_proxy_window(app: &AppHandle) {
 		"proxy",
 		tauri::WebviewUrl::App("index.html?view=proxy".into()),
 	)
-	.title("Proxy Settings")
+	.title("代理设置")
 	.inner_size(640.0, 520.0)
 	.resizable(true)
 	.maximizable(true)
+	.minimizable(true)
+	.closable(true);
+
+	let _ = builder.build();
+}
+
+fn open_rightcodes_login_window(app: &AppHandle) {
+	if let Some(window) = app.get_webview_window("rightcodes_login") {
+		let _ = window.show();
+		let _ = window.set_focus();
+		return;
+	}
+
+	// 说明：使用 Webview 窗口承载登录 UI（支持用户名+密码输入）。
+	// 密码只用于换取 token；不会落盘；token 会按“keyring 优先、文件兜底”策略保存。
+	let builder = tauri::WebviewWindowBuilder::new(
+		app,
+		"rightcodes_login",
+		tauri::WebviewUrl::App("index.html?view=rightcodes_login".into()),
+	)
+	.title("Right.codes 登录")
+	.inner_size(520.0, 360.0)
+	.resizable(true)
+	.maximizable(false)
 	.minimizable(true)
 	.closable(true);
 
@@ -479,6 +556,11 @@ fn open_proxy_window(app: &AppHandle) {
 struct ProxySaveResult {
 	available: bool,
 	last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RightcodesLoginResult {
+	stored_in: String,
 }
 
 #[tauri::command]
@@ -505,6 +587,50 @@ fn tokbar_set_proxy_config(
 	})
 }
 
+#[tauri::command]
+fn tokbar_rightcodes_login(app: AppHandle, username: String, password: String) -> Result<RightcodesLoginResult, String> {
+	let user = username.trim();
+	if user.is_empty() || password.is_empty() {
+		return Err("请输入用户名和密码。".to_string());
+	}
+
+	let client = rightcodes_api::RightcodesApiClient::new("https://right.codes");
+	let token = client.login(user, &password).map_err(|e| match e {
+		rightcodes_api::RightcodesApiError::Auth => "认证失败：请检查账号/密码。".to_string(),
+		rightcodes_api::RightcodesApiError::RateLimited { retry_after_seconds } => {
+			if let Some(s) = retry_after_seconds {
+				format!("触发限流（429），请 {s}s 后重试。")
+			} else {
+				"触发限流（429），请稍后重试。".to_string()
+			}
+		}
+		rightcodes_api::RightcodesApiError::Network => "网络错误：请检查网络后重试。".to_string(),
+		rightcodes_api::RightcodesApiError::HttpStatus(code) => format!("登录失败：接口错误（HTTP {code}）。"),
+		rightcodes_api::RightcodesApiError::BadPayload => "登录失败：接口返回异常（无法解析）。".to_string(),
+	})?;
+
+	let store = rightcodes_token_store::RightcodesTokenStore::new();
+	let stored_in = store.save_token(&token).map_err(|e| {
+		// 说明：错误信息不得包含任何敏感信息（token/密码）。
+		format!("保存 token 失败：{e}")
+	})?;
+
+	// 登录成功后立即刷新一次，确保状态栏/菜单立刻更新（而不是等 30s 刷新线程）。
+	if let Some(state) = app.try_state::<AppState>() {
+		let settings = *state.settings.lock().expect("settings lock poisoned");
+		update_tray_title(&app, settings);
+	}
+
+	let stored_in_text = match stored_in {
+		rightcodes_token_store::StoredIn::Keyring => "keyring",
+		rightcodes_token_store::StoredIn::File => "file",
+	};
+
+	Ok(RightcodesLoginResult {
+		stored_in: stored_in_text.to_string(),
+	})
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
 	tauri::Builder::default()
@@ -513,7 +639,11 @@ pub fn run() {
 			tauri_plugin_autostart::MacosLauncher::LaunchAgent,
 			None,
 		))
-		.invoke_handler(tauri::generate_handler![tokbar_get_proxy_config, tokbar_set_proxy_config])
+		.invoke_handler(tauri::generate_handler![
+			tokbar_get_proxy_config,
+			tokbar_set_proxy_config,
+			tokbar_rightcodes_login
+		])
 		.setup(|app| {
 			use tauri_plugin_autostart::ManagerExt as _;
 
@@ -553,6 +683,10 @@ pub fn run() {
 					let mut settings = state.settings.lock().expect("settings lock poisoned");
 
 					match event.id().as_ref() {
+						"rightcodes.login" => {
+							open_rightcodes_login_window(app);
+							return;
+						}
 						"refresh" => {
 							let app = app.clone();
 							let settings = *settings;

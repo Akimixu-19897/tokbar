@@ -43,9 +43,86 @@ function inputRow(label: string, id: string, placeholder: string) {
   return { row, input };
 }
 
+function inputRowWithType(
+  label: string,
+  id: string,
+  placeholder: string,
+  type: string,
+) {
+  const { row, input } = inputRow(label, id, placeholder);
+  input.type = type;
+  return { row, input };
+}
+
 function normalizeOptionalText(value: string): string | null {
   const trimmed = value.trim();
   return trimmed.length ? trimmed : null;
+}
+
+type RightcodesLoginResult = {
+  stored_in: "keyring" | "file";
+};
+
+async function renderRightcodesLogin(root: HTMLElement) {
+  root.innerHTML = "";
+
+  const wrap = document.createElement("div");
+  wrap.className = "tokbar-wrap";
+
+  const title = document.createElement("div");
+  title.className = "tokbar-title";
+  title.textContent = "Right.codes 登录";
+
+  const desc = document.createElement("div");
+  desc.className = "tokbar-desc";
+  desc.textContent =
+    "账号密码仅用于换取 token（不落盘）。token 会优先写入系统 keyring；不可用则降级保存到本地文件。";
+
+  const username = inputRowWithType("用户名", "rc-username", "yourname", "text");
+  const password = inputRowWithType("密码", "rc-password", "password", "password");
+
+  const buttonRow = document.createElement("div");
+  buttonRow.className = "tokbar-actions";
+
+  const status = document.createElement("div");
+  status.className = "tokbar-status";
+
+  const login = document.createElement("button");
+  login.className = "tokbar-button";
+  login.textContent = "登录并保存 token";
+
+  buttonRow.append(login);
+  wrap.append(title, desc, username.row, password.row, buttonRow, status);
+  root.append(wrap);
+
+  function setStatus(text: string, kind: "ok" | "err" | "info") {
+    status.textContent = text;
+    status.dataset.kind = kind;
+  }
+
+  async function doLogin() {
+    login.disabled = true;
+    try {
+      setStatus("登录中…", "info");
+      const result = (await invoke("tokbar_rightcodes_login", {
+        username: username.input.value,
+        password: password.input.value,
+      })) as RightcodesLoginResult;
+
+      // 安全起见：清空密码输入框，避免误泄露（例如被截图/录屏）。
+      password.input.value = "";
+      setStatus(`登录成功（token 已保存到 ${result.stored_in}）。`, "ok");
+    } catch (e) {
+      setStatus(`登录失败：${String(e)}`, "err");
+    } finally {
+      login.disabled = false;
+    }
+  }
+
+  login.addEventListener("click", doLogin);
+  password.input.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") void doLogin();
+  });
 }
 
 async function renderProxySettings(root: HTMLElement) {
@@ -160,8 +237,9 @@ window.addEventListener("DOMContentLoaded", async () => {
   const view = getView();
   if (view === "proxy") {
     await renderProxySettings(root);
+  } else if (view === "rightcodes_login") {
+    await renderRightcodesLogin(root);
   } else {
     renderEmpty(root);
   }
 });
-

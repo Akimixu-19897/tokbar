@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(dead_code))]
+
 // tokbar Rust 库入口。
 //
 // 说明：
@@ -13,6 +15,9 @@ pub mod litellm;
 mod pricing;
 mod proxy_config;
 pub mod raw_format;
+mod rightcodes;
+mod rightcodes_api;
+mod rightcodes_token_store;
 
 #[cfg(test)]
 mod test_util;
