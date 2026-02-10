@@ -109,17 +109,26 @@ fn parse_usage_entry(value: &Value) -> Option<ClaudeUsageEntry> {
 	let timestamp = as_non_empty_string(value.get("timestamp"))?;
 
 	let message = value.get("message")?.as_object()?;
-	let usage = message.get("usage")?.as_object()?;
 
-	let input_tokens = as_u64_token(usage.get("input_tokens"))?;
-	let output_tokens = as_u64_token(usage.get("output_tokens"))?;
+	// 说明：
+	// - Claude Code 的 usage 形态可能随“接入不同提供商模型”而变化。
+	// - 这里兼容两类常见字段名：
+	//   - Anthropic 风格：input_tokens / output_tokens
+	//   - OpenAI 风格：prompt_tokens / completion_tokens
+	let usage = message
+		.get("usage")
+		.or_else(|| value.get("usage"))
+		.and_then(|v| v.as_object())?;
+
+	let input_tokens = first_u64_token(usage, &["input_tokens", "prompt_tokens"])?;
+	let output_tokens = first_u64_token(usage, &["output_tokens", "completion_tokens"])?;
 	let cache_creation_input_tokens =
 		as_u64_token(usage.get("cache_creation_input_tokens")).unwrap_or(0);
 	let cache_read_input_tokens = as_u64_token(usage.get("cache_read_input_tokens")).unwrap_or(0);
 
 	let message_id = as_non_empty_string(message.get("id"));
 	let request_id = as_non_empty_string(value.get("requestId"));
-	let model = as_non_empty_string(message.get("model"));
+	let model = as_non_empty_string(message.get("model")).or_else(|| as_non_empty_string(value.get("model")));
 	let cost_usd = as_f64(value.get("costUSD"));
 
 	Some(ClaudeUsageEntry {
@@ -133,6 +142,15 @@ fn parse_usage_entry(value: &Value) -> Option<ClaudeUsageEntry> {
 		cache_read_input_tokens,
 		cost_usd,
 	})
+}
+
+fn first_u64_token(usage: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<u64> {
+	for k in keys {
+		if let Some(v) = as_u64_token(usage.get(*k)) {
+			return Some(v);
+		}
+	}
+	None
 }
 
 fn unique_hash(entry: &ClaudeUsageEntry) -> Option<String> {
@@ -749,6 +767,53 @@ mod tests {
 		let totals = load_claude_totals_from_files_with_pricing(&[file_path], &range, &dataset);
 		assert_eq!(totals.total_tokens, 150);
 		let expected = 100.0 * 3e-6 + 50.0 * 1.5e-5;
+		assert!((totals.cost_usd - expected).abs() < 1e-12);
+	}
+
+	#[test]
+	fn accepts_openai_style_usage_keys_prompt_and_completion_tokens() {
+		let tmp = tempfile::tempdir().expect("tempdir");
+		let base = tmp.path().join(".claude");
+		let projects = base.join("projects").join("p1");
+		std::fs::create_dir_all(&projects).expect("mkdir");
+
+		let file_path = projects.join("session.jsonl");
+		let day = Local
+			.with_ymd_and_hms(2026, 2, 6, 12, 0, 0)
+			.single()
+			.expect("local dt")
+			.to_rfc3339();
+
+		let line = serde_json::json!({
+			"timestamp": day,
+			"message": {
+				"id": "m1",
+				"model": "gpt-4o",
+				"usage": { "prompt_tokens": 100, "completion_tokens": 50 }
+			},
+			"requestId": "r1"
+		});
+		std::fs::write(&file_path, line.to_string()).expect("write");
+
+		let range = DateRange {
+			since_yyyymmdd: "20260206".to_string(),
+			until_yyyymmdd: "20260206".to_string(),
+			label: "Today",
+		};
+
+		let mut dataset = HashMap::new();
+		dataset.insert(
+			"openai/gpt-4o".to_string(),
+			LiteLLMModelPricing {
+				input_cost_per_token: Some(1e-6),
+				output_cost_per_token: Some(2e-6),
+				..Default::default()
+			},
+		);
+
+		let totals = load_claude_totals_from_files_with_pricing(&[file_path], &range, &dataset);
+		assert_eq!(totals.total_tokens, 150);
+		let expected = 100.0 * 1e-6 + 50.0 * 2e-6;
 		assert!((totals.cost_usd - expected).abs() < 1e-12);
 	}
 
